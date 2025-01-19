@@ -1,4 +1,5 @@
 import torch
+from torch import optim
 import torch.nn as nn
 from torch.nn import functional as F
 from preprocess.preprocess import ImageDataset, displayImage
@@ -6,10 +7,18 @@ from torch.utils.data import DataLoader, random_split
 
 MAX_ITERS = 5000
 eval_interval = 500
-learning_rate = 1e-3
+learning_rate = 1e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 
+def dice_loss_binary(prediction, targets, smooth=1e-6):
+    probs = torch.sigmoid(prediction)
+    probs_flat = probs.view(-1)
+    targets_flat = targets.view(-1)
+    
+    intersection = (probs_flat * targets_flat).sum()
+    dice_coeff = (2.0 * intersection + smooth) / (probs_flat.sum() + targets_flat.sum() + smooth)
+    return 1 - dice_coeff
 
 class EncodingLayer(nn.Module):
 
@@ -136,50 +145,59 @@ class UNet(nn.Module):
 
 model = UNet()
 model = model.to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-dataset = ImageDataset()
+optimizer = optim.RMSprop(model.parameters(),
+                            lr=learning_rate, weight_decay=1e-8, momentum=0.9, foreach=True)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
 
+dataset = ImageDataset()
+num_epochs = 10
 def train():
 
     numEval = len(dataset) // 10
     numTrain = len(dataset) - numEval
 
-    trainSet, valSet = random_split(dataset, [numTrain, numEval], generator=torch.Generator().manual_seed(0))
+    for epoch in range(num_epochs):
+        trainSet, valSet = random_split(dataset, [numTrain, numEval], generator=torch.Generator().manual_seed(0))
 
-    trainLoader = DataLoader(trainSet, shuffle=True, batch_size=4)
-    valLoader = DataLoader(valSet, shuffle=False, drop_last=True, batch_size=4)
+        trainLoader = DataLoader(trainSet, shuffle=True, batch_size=1)
+        valLoader = DataLoader(valSet, shuffle=False, drop_last=True, batch_size=1)
+        for iter, batch in enumerate(trainLoader):
+            images, masks = batch['X'], batch['Y']
+            
+            images = images.to(device=device, dtype=torch.float32)
+            masks = masks.to(device=device, dtype=torch.float32)
+            
+            if iter != 0 and iter % eval_interval == 0: # test the model every eval intervals
+                model.eval()
+                losses = torch.zeros(len(valLoader))
+                for i, valBatch in enumerate(valLoader):
+                    valX, valY= valBatch['X'], valBatch['Y']
 
-    for iter, batch in enumerate(trainLoader):
-        images, masks = batch['X'], batch['Y']
-        
-        images = images.to(device=device, dtype=torch.float32)
-        masks = masks.to(device=device, dtype=torch.float32)
-        
-        if iter % eval_interval == 0: # test the model every eval intervals
+                    X = valX.to(device=device, dtype=torch.float32)
+                    Y = valY.to(device=device, dtype=torch.float32)
 
-            model.eval()
-            losses = torch.zeros(len(valLoader))
-            for i, valBatch in enumerate(valLoader):
-                valX, valY= valBatch['X'], valBatch['Y']
+                    predictions, loss = model(X, Y)
+                    losses[i] = loss.item()
 
-                X = valX.to(device=device, dtype=torch.float32)
-                Y = valY.to(device=device, dtype=torch.float32)
+                meanLoss = losses.mean() # do eval iters iterations of testing, and take average for better loss calculation
+                print(f"step {iter}: val loss {meanLoss:.4f}")
 
-                predictions, loss = model(X, Y)
-                losses[i] = loss.item()
+                model.train()
 
-            meanLoss = losses.mean() # do eval iters iterations of testing, and take average for better loss calculation
-            print(f"step {iter}: val loss {meanLoss:.4f}")
+            predictions, loss = model(images, masks)
+            loss += dice_loss_binary(predictions, masks)
 
-            model.train()
+            # displayImage(predictions.cpu().detach())
+            # displayImage(masks.cpu().detach())
 
-        predictions, loss = model(images, masks)
-        print(f"Iter {iter}, training loss = {loss.item():.4f}")
+            print(f"Iter {iter}, training loss = {loss.item()}")
 
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
-        
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+
+            optimizer.step()
+
 train()
 
 save_path = "unet_model.pth"
