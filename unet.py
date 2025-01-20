@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader, random_split
 
 MAX_ITERS = 5000
 eval_interval = 500
-learning_rate = 1e-4
+learning_rate = 1e-5
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 
@@ -18,6 +18,7 @@ def dice_loss_binary(prediction, targets, smooth=1e-6):
     
     intersection = (probs_flat * targets_flat).sum()
     dice_coeff = (2.0 * intersection + smooth) / (probs_flat.sum() + targets_flat.sum() + smooth)
+
     return 1 - dice_coeff
 
 class EncodingLayer(nn.Module):
@@ -41,12 +42,12 @@ class EncodingLayer(nn.Module):
             self.maxPool = nn.MaxPool2d((2, 2), 2)
 
     def forward(self, x):
+
         if not self.first:
             x = self.maxPool(x)
 
-        output = self.nn(x)
-
-        return output
+        x = self.nn(x)
+        return x
     
 
 class Encoder(nn.Module):
@@ -68,7 +69,7 @@ class Encoder(nn.Module):
         for layer in self.nn:
             x = layer(x)
             outputs.append(x)
-
+            print(f"Encoder Layer output min: {x.min().item()}, max: {x.max().item()}, mean: {x.mean().item()}")
         return outputs[::-1] # 0th index is the output for the last layer
 
 class DecodingLayer(nn.Module):
@@ -99,7 +100,6 @@ class DecodingLayer(nn.Module):
 
         x = torch.cat((x1, x2), dim=1) # add across channel dim, this is why its 2*inChannels for first convolution, the second input is the corresponding encoder output
         x = self.nn(x)
-        
         return x
         
 class Decoder(nn.Module):
@@ -112,7 +112,7 @@ class Decoder(nn.Module):
             DecodingLayer(512),
             DecodingLayer(256),
             DecodingLayer(128),
-            DecodingLayer(64, 1)
+            DecodingLayer(64, 64)
         )
     def forward(self, outputs):
 
@@ -121,7 +121,8 @@ class Decoder(nn.Module):
         for i in range(len(self.nn)):
             layer = self.nn[i]
             x = layer(x, outputs[i + 1])
-        
+            print(f"Decoder Layer output min: {x.min().item()}, max: {x.max().item()}, mean: {x.mean().item()}")
+
         return x
     
 class UNet(nn.Module):
@@ -131,12 +132,13 @@ class UNet(nn.Module):
         super().__init__()
         self.encoder = Encoder()
         self.decoder = Decoder()
+        self.final = nn.Conv2d(64, 1, (3, 3), padding=1)
         self.criterion = nn.BCEWithLogitsLoss()
 
     def forward(self, input, target = None):
-        outputs = self.encoder(input)
-        prediction = self.decoder(outputs)
-
+        x = self.encoder(input)
+        x = self.decoder(x)
+        prediction = self.final(x)
         loss = None
         if target is not None:
             loss = self.criterion(prediction, target)
@@ -146,55 +148,70 @@ class UNet(nn.Module):
 model = UNet()
 model = model.to(device)
 optimizer = optim.RMSprop(model.parameters(),
-                            lr=learning_rate, weight_decay=1e-8, momentum=0.9, foreach=True)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
+                            lr=learning_rate, weight_decay=1e-8, momentum=0.999, foreach=True)
+# scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
 
 dataset = ImageDataset()
 num_epochs = 10
 def train():
-
+    model.train()
     numEval = len(dataset) // 10
     numTrain = len(dataset) - numEval
 
-    for epoch in range(num_epochs):
-        trainSet, valSet = random_split(dataset, [numTrain, numEval], generator=torch.Generator().manual_seed(0))
+    trainSet, valSet = random_split(dataset, [numTrain, numEval], generator=torch.Generator().manual_seed(0))
 
-        trainLoader = DataLoader(trainSet, shuffle=True, batch_size=1)
-        valLoader = DataLoader(valSet, shuffle=False, drop_last=True, batch_size=1)
+    trainLoader = DataLoader(trainSet, shuffle=True, batch_size=1)
+    valLoader = DataLoader(valSet, shuffle=False, drop_last=True, batch_size=1)
+    for epoch in range(num_epochs):
+
         for iter, batch in enumerate(trainLoader):
             images, masks = batch['X'], batch['Y']
-            
             images = images.to(device=device, dtype=torch.float32)
             masks = masks.to(device=device, dtype=torch.float32)
-            
-            if iter != 0 and iter % eval_interval == 0: # test the model every eval intervals
-                model.eval()
-                losses = torch.zeros(len(valLoader))
-                for i, valBatch in enumerate(valLoader):
-                    valX, valY= valBatch['X'], valBatch['Y']
 
-                    X = valX.to(device=device, dtype=torch.float32)
-                    Y = valY.to(device=device, dtype=torch.float32)
+            # if iter != 0 and iter % eval_interval == 0: # test the model every eval intervals
+            #     model.eval()
+            #     losses = torch.zeros(len(valLoader))
+            #     for i, valBatch in enumerate(valLoader):
+            #         valX, valY= valBatch['X'], valBatch['Y']
 
-                    predictions, loss = model(X, Y)
-                    losses[i] = loss.item()
+            #         X = valX.to(device=device, dtype=torch.float32)
+            #         Y = valY.to(device=device, dtype=torch.float32)
 
-                meanLoss = losses.mean() # do eval iters iterations of testing, and take average for better loss calculation
-                print(f"step {iter}: val loss {meanLoss:.4f}")
+            #         predictions, loss = model(X, Y)
+            #         losses[i] = loss.item()
 
-                model.train()
+            #     meanLoss = losses.mean() # do eval iters iterations of testing, and take average for better loss calculation
+            #     print(f"step {iter}: val loss {meanLoss:.4f}")
+
+            #     model.train()
 
             predictions, loss = model(images, masks)
-            loss += dice_loss_binary(predictions, masks)
 
-            # displayImage(predictions.cpu().detach())
-            # displayImage(masks.cpu().detach())
+            print(f"Loss before dice: {loss.item()}")
+            loss += dice_loss_binary(predictions, masks)
 
             print(f"Iter {iter}, training loss = {loss.item()}")
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+
+            probs = torch.sigmoid(predictions)
+            print(f"Sigmoid probs min: {probs.min().item()}, max: {probs.max().item()}, mean: {probs.mean().item()}")
+            print(f"Logits min: {predictions.min().item()}, max: {predictions.max().item()}, mean: {predictions.mean().item()}")
+
+            # if iter == 100:
+            #     displayImage(torch.sigmoid(predictions).cpu().detach())
+            #     displayImage(masks.cpu().detach())
+
+            #     print(model.decoder.nn[-1].nn[-2].weight.data)
+
+            #     for name, param in model.named_parameters():
+            #         if param.grad is not None:
+            #             print(f"Param: {name}, grad mean: {param.grad.mean()}, grad std: {param.grad.std()}")
+
+            #     print(notworking)
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
 
             optimizer.step()
 
@@ -210,7 +227,7 @@ sample = next(iter(dataset))
 x = sample['X']
 y = sample['Y']
 y_pred = model(x)
-
+y_pred = torch.sigmoid(y_pred).cpu().detach()
 
 displayImage(x)
 displayImage(y)

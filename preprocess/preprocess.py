@@ -11,7 +11,6 @@ TRAIN_X_FILES = os.listdir(TRAIN_X_DATA_SOURCE)
 TRAIN_Y_FILES = os.listdir(TRAIN_Y_DATA_SOURCE)
 
 def displayImage(tensor):
-    
     tensor = tensor.permute(0, 2, 3, 1)
     plt.imshow(tensor[0])
     plt.show()
@@ -65,9 +64,11 @@ dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
 
 
 # Get one random sample
+
 # sample = next(iter(dataloader))
 # x = sample['X']
 # y = sample['Y']
+# print(torch.unique(x))
 # print(y.shape)
 # displayImage(x)
 # displayImage(y)
