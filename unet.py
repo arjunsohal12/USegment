@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader, random_split
 
 MAX_ITERS = 5000
 eval_interval = 500
-learning_rate = 1e-5
+learning_rate = 1e-7
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 
@@ -94,7 +94,7 @@ class DecodingLayer(nn.Module):
     def forward(self, x1, x2):
         x1 = self.upsample(x1)
 
-        if x1.shape != x2.shape: # pad to make sure both are saqme size per channel (h, w), this happens when input image not power of 2 since we half the dimensions with maxpool
+        if x1.shape != x2.shape: # pad to make sure both are same size per channel (h, w), this happens when input image not power of 2 since we half the dimensions with maxpool
             x_, y_= x2.shape[3] - x1.shape[3], x2.shape[2] - x1.shape[2]
             x1 = F.pad(x1, (x_ // 2, x_ - x_ // 2, y_ // 2, y_ - y_ // 2))
 
@@ -139,6 +139,7 @@ class UNet(nn.Module):
         x = self.encoder(input)
         x = self.decoder(x)
         prediction = self.final(x)
+        
         loss = None
         if target is not None:
             loss = self.criterion(prediction, target)
@@ -148,8 +149,7 @@ class UNet(nn.Module):
 model = UNet()
 model = model.to(device)
 optimizer = optim.RMSprop(model.parameters(),
-                            lr=learning_rate, weight_decay=1e-8, momentum=0.999, foreach=True)
-# scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
+                            lr=learning_rate, weight_decay=1e-8, momentum=0.99, foreach=True)
 
 dataset = ImageDataset()
 num_epochs = 10
@@ -187,6 +187,10 @@ def train():
             #     model.train()
 
             predictions, loss = model(images, masks)
+            probs = torch.sigmoid(predictions)
+
+            print(f"Sigmoid probs min: {probs.min().item()}, max: {probs.max().item()}, mean: {probs.mean().item()}")
+            print(f"Logits min: {predictions.min().item()}, max: {predictions.max().item()}, mean: {predictions.mean().item()}")
 
             print(f"Loss before dice: {loss.item()}")
             loss += dice_loss_binary(predictions, masks)
@@ -196,39 +200,29 @@ def train():
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
 
-            probs = torch.sigmoid(predictions)
-            print(f"Sigmoid probs min: {probs.min().item()}, max: {probs.max().item()}, mean: {probs.mean().item()}")
-            print(f"Logits min: {predictions.min().item()}, max: {predictions.max().item()}, mean: {predictions.mean().item()}")
-
-            # if iter == 100:
-            #     displayImage(torch.sigmoid(predictions).cpu().detach())
-            #     displayImage(masks.cpu().detach())
-
-            #     print(model.decoder.nn[-1].nn[-2].weight.data)
-
-            #     for name, param in model.named_parameters():
-            #         if param.grad is not None:
-            #             print(f"Param: {name}, grad mean: {param.grad.mean()}, grad std: {param.grad.std()}")
-
-            #     print(notworking)
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
-
             optimizer.step()
 
-train()
+        displayImage(torch.sigmoid(predictions).cpu().detach())
+        displayImage(masks.cpu().detach())
 
-save_path = "unet_model.pth"
 
-torch.save(model.state_dict(), save_path)
-print(f"Model weights saved to {save_path}")
+if __name__ == "__main__":
+    train()
 
-sample = next(iter(dataset))
+    save_path = "unet_model.pth"
 
-x = sample['X']
-y = sample['Y']
-y_pred = model(x)
-y_pred = torch.sigmoid(y_pred).cpu().detach()
+    torch.save(model.state_dict(), save_path)
+    print(f"Model weights saved to {save_path}")
 
-displayImage(x)
-displayImage(y)
-displayImage(y_pred)
+    model.eval()
+
+    sample = next(iter(dataset))
+
+    x = sample['X']
+    y = sample['Y']
+    y_pred = model(x)
+    y_pred = torch.sigmoid(y_pred).cpu().detach()
+
+    displayImage(x)
+    displayImage(y)
+    displayImage(y_pred)
